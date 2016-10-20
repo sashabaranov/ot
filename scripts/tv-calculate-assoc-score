@@ -1,0 +1,41 @@
+#!/usr/bin/env python
+import logging
+import click
+import requests
+import numpy
+
+API_ENDPOINT = "https://www.targetvalidation.org/api/latest/public/association/filter"
+
+logging.basicConfig(
+    format=u'(%(processName)s - %(filename)s:%(lineno)d//%(levelname)s)\t%(message)s'
+)
+
+def get_data(parameters):
+    return requests.get(API_ENDPOINT, params=parameters).json()
+
+
+@click.command(help='Calculates max, min, avg and stddev of association_score.overall')
+@click.option('--disease', '-d', type=str, help='Process disease')
+@click.option('--target', '-t', type=str, help='Process target')
+def main(disease, target):
+    parameters = None
+    if disease:
+        parameters = {'disease': disease}
+    elif target:
+        parameters = {'target': target}
+    else:
+        logging.error("Either disease or target should be specified.")
+        return
+
+    data = get_data(parameters)['data']
+    scores = numpy.array([x['association_score']['overall'] for x in data])
+
+    click.echo("maximum: {}".format(scores.max()))
+    click.echo("minimum: {}".format(scores.min()))
+    click.echo("average: {}".format(scores.mean()))
+    click.echo("standard deviation: {}".format(scores.std()))
+
+
+
+if __name__ == '__main__':
+    main()
