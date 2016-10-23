@@ -1,0 +1,147 @@
+#!/usr/bin/env python
+import logging
+import click
+import ujson as json
+from time import sleep
+from multiprocessing import Queue, Pool, Process, Manager
+import csv
+
+
+def configure_logging(debug):
+    logging.basicConfig(
+        format=u'(%(processName)s - %(filename)s:%(lineno)d//%(levelname)s)\t%(message)s',
+        level=logging.DEBUG if debug else logging.ERROR
+    )
+
+
+def reader(task_queue, filename, reader_stopped_event):
+    logging.debug("Reader started")
+    with open(filename) as f:
+        for line in f:
+        # for _ in xrange(50000):
+            # line = f.readline()
+            task_queue.put(line)
+
+    logging.debug("Reader stopped")
+    reader_stopped_event.set()
+
+
+def worker(task_queue, result_queue, reader_stopped_event):
+    logging.debug("Worker started")
+    while not (reader_stopped_event.is_set() and task_queue.empty()):
+        try:
+            obj = json.loads(task_queue.get(True, 3))
+        except:
+            continue
+
+        score = obj['scores']['association_score']
+        pair_id = "{}|{}".format(obj['target']['id'], obj['disease']['id'])
+        result_queue.put((pair_id, score))
+
+    result_queue.put(("WORKER_FINISHED", -1))
+    logging.debug("Worker stopped")
+
+
+def write_results_to_csv(results, output_csv):
+    for pair, scores in results.items():
+        sorted_scores = sorted(scores)
+        median = sorted_scores[len(sorted_scores)/2]
+        top3 = sorted_scores[-3:]
+        target, disease = pair.split("|")
+        results[pair] = tuple([target, disease, median] + top3)
+
+    output = sorted([v for v in results.values()], key=lambda v: v[2])
+    with open(output_csv, 'wb') as csvfile:
+        writer = csv.writer(csvfile)
+        for row in output:
+            writer.writerow(row)
+
+
+def _calculate_pairs(args):
+    i, targets, target_to_disease = args
+
+    ret = 0
+    for j in xrange(i+1, len(targets)):
+        ds1 = target_to_disease[targets[i]]
+        ds2 = target_to_disease[targets[j]]
+        if len(ds1.intersection(ds2)) >= 2:
+            ret += 1
+    return ret
+
+
+def count_tt_pairs(results, nprocs):
+    pool = Pool(nprocs)
+
+    target_to_disease = {}
+    for pair in results.keys():
+        target, disease = pair.split("|")
+        if not target in target_to_disease:
+            target_to_disease[target] = set([])
+        target_to_disease[target].update([disease])
+
+    tt_pairs = 0
+    targets = target_to_disease.keys()
+
+    results = pool.map(_calculate_pairs, [(i, targets, target_to_disease) for i in xrange(len(target_to_disease))])
+
+
+    pool.close()
+    pool.join()
+
+    return sum(results)
+
+
+
+
+@click.command(help='Counts academic nausea for given files. Output is stored to sqlite db.')
+@click.option('--nprocs', default=1, type=int, help='Number of processes to utilize')
+@click.option('--debug', default=False, is_flag=True, help='Print debug output')
+@click.option('--calculate-pairs', default=False, is_flag=True, help='Calculate target-target pairs sharing 2+ diseases')
+@click.argument('filename', nargs=1)
+@click.argument('output_csv', nargs=1)
+def main(nprocs, debug, calculate_pairs, filename, output_csv):
+    configure_logging(debug)
+
+    manager = Manager()
+
+    task_queue = manager.Queue()
+    result_queue = manager.Queue()
+    reader_stopped_event = manager.Event()
+
+    reader_p = Process(target=reader, args=(task_queue, filename, reader_stopped_event))
+    reader_p.start()
+
+    pool = Pool(nprocs, worker, (task_queue, result_queue, reader_stopped_event))
+    workers_running = nprocs
+
+    results = {}
+    while not (workers_running == 0 and result_queue.empty()):
+        pair_id, score = result_queue.get()
+        if pair_id == "WORKER_FINISHED":
+            workers_running -= 1
+            continue
+
+        if not pair_id in results:
+            results[pair_id] = [] # possible optimisation: can store in pre-sorted structure here
+
+        results[pair_id].append(score)
+
+    logging.debug("Result reading finished")
+
+    logging.debug("Writing results to csv")
+    write_results_to_csv(results, output_csv)
+
+    pool.close()
+    pool.join()
+    reader_p.join()
+
+    if calculate_pairs:
+        logging.debug("Calculating pairs")
+        print count_tt_pairs(results, nprocs)
+
+    logging.info("Done")
+
+
+
+if __name__ == '__main__':
+    main()
