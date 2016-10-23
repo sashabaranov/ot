@@ -10,7 +10,8 @@ setup(
         "click",
         "requests",
         "jwt",
-        "numpy"
+        "numpy",
+        "ujson",
     ],
     tests_require=["pytest"],
     scripts=['scripts/tv-calculate-assoc-score']
